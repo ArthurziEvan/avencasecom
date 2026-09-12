@@ -42,6 +42,11 @@ PASTA_DADOS.mkdir(exist_ok=True)
 # automaticamente (evita acumular disco com sessões abandonadas).
 HORAS_PARA_EXPIRAR = 48
 
+# CEP usado para definir a localização de entrega em sites como a Amazon,
+# já que o servidor roda fora do Brasil e o site não consegue adivinhar
+# a localização certa sozinho. Pode trocar via variável de ambiente CEP_PADRAO.
+CEP_PADRAO = os.environ.get("CEP_PADRAO", "70165900")  # Senado Federal, Brasília-DF
+
 app = Flask(__name__)
 # Em produção, defina a variável de ambiente SECRET_KEY (veja instruções de deploy).
 # Isso garante que o cookie de sessão de cada pessoa continue válido entre reinícios.
@@ -84,6 +89,36 @@ def nome_arquivo_seguro(url: str) -> str:
     return f"{dominio}_{sufixo}.pdf"
 
 
+async def configurar_cep_amazon(page, cep: str):
+    """Se a página for da Amazon, define o CEP de entrega antes do print.
+    Se algo não bater (a Amazon muda o site com frequência), simplesmente
+    desiste e segue em frente — não deve travar a geração do PDF."""
+    try:
+        link_localizacao = page.locator("#nav-global-location-popover-link")
+        await link_localizacao.click(timeout=5000)
+
+        campo_cep = page.locator("#GLUXZipUpdateInput")
+        await campo_cep.wait_for(timeout=5000)
+        await campo_cep.fill(cep)
+
+        botao_aplicar = page.locator("#GLUXZipUpdate input[type='submit'], #GLUXZipUpdate button")
+        await botao_aplicar.click(timeout=5000)
+
+        # Depois de aplicar, geralmente aparece um botão "Concluído"/"Done"
+        # para fechar o popover de confirmação.
+        botao_concluir = page.locator(
+            "button:has-text('Concluído'), button:has-text('Done'), "
+            "input[name='glowDoneButton']"
+        )
+        await botao_concluir.click(timeout=5000)
+
+        # Dá um tempo para a página recarregar os preços/frete com o novo CEP.
+        await page.wait_for_timeout(2000)
+    except Exception:
+        # Não é uma página da Amazon, ou a Amazon mudou o layout — segue sem travar.
+        pass
+
+
 async def gerar_pdf_de_url(url: str, pasta_paginas: Path) -> Path:
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -96,6 +131,10 @@ async def gerar_pdf_de_url(url: str, pasta_paginas: Path) -> Path:
         )
         page = await context.new_page()
         await page.goto(url, wait_until="networkidle", timeout=60_000)
+
+        if "amazon." in urlparse(url).netloc:
+            await configurar_cep_amazon(page, CEP_PADRAO)
+
         await page.wait_for_timeout(1500)
 
         caminho_pdf = pasta_paginas / nome_arquivo_seguro(url)

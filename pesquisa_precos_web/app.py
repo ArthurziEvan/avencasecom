@@ -89,14 +89,12 @@ def nome_arquivo_seguro(url: str) -> str:
     return f"{dominio}_{sufixo}.pdf"
 
 
-async def configurar_cep_amazon(page, cep: str) -> bool:
+async def configurar_cep_amazon(page, cep: str, caminho_debug: Path = None) -> bool:
     """Se a página for da Amazon, define o CEP de entrega antes do print.
-    Retorna True se conseguiu, False se não (para avisar o usuário em vez
-    de falhar silenciosamente)."""
+    Retorna True se conseguiu, False se não. Se caminho_debug for informado
+    e a automação falhar, salva um print da tela naquele momento — assim dá
+    pra ver exatamente o que a página mostrava e ajustar os seletores."""
     try:
-        # A Amazon tem mais de um jeito de abrir esse seletor dependendo da
-        # página/layout: às vezes é um ícone de localização no topo, às vezes
-        # é um link de texto "Atualizar CEP" mais abaixo. Tentamos os dois.
         gatilho = page.locator(
             "#nav-global-location-popover-link, "
             "a:has-text('Atualizar CEP'), "
@@ -114,9 +112,6 @@ async def configurar_cep_amazon(page, cep: str) -> bool:
         ).first
         await botao_aplicar.click(timeout=8000)
 
-        # Depois de aplicar, geralmente aparece um botão "Concluído"/"Done"
-        # para fechar o popover de confirmação — mas nem sempre aparece,
-        # então não tratamos a ausência dele como falha.
         try:
             botao_concluir = page.locator(
                 "button:has-text('Concluído'), button:has-text('Done'), "
@@ -129,10 +124,15 @@ async def configurar_cep_amazon(page, cep: str) -> bool:
         await page.wait_for_timeout(2000)
         return True
     except Exception:
+        if caminho_debug is not None:
+            try:
+                await page.screenshot(path=str(caminho_debug))
+            except Exception:
+                pass
         return False
 
 
-async def gerar_pdf_de_url(url: str, pasta_paginas: Path) -> tuple:
+async def gerar_pdf_de_url(url: str, pasta_paginas: Path, pasta_debug: Path = None) -> tuple:
     cep_ajustado = True
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -147,7 +147,8 @@ async def gerar_pdf_de_url(url: str, pasta_paginas: Path) -> tuple:
         await page.goto(url, wait_until="networkidle", timeout=60_000)
 
         if "amazon." in urlparse(url).netloc:
-            cep_ajustado = await configurar_cep_amazon(page, CEP_PADRAO)
+            caminho_debug = (pasta_debug / "debug_cep_amazon.png") if pasta_debug else None
+            cep_ajustado = await configurar_cep_amazon(page, CEP_PADRAO, caminho_debug)
 
         await page.wait_for_timeout(1500)
 
@@ -208,7 +209,9 @@ def adicionar():
         return redirect(url_for("index"))
 
     try:
-        caminho_pdf, cep_ajustado = asyncio.run(gerar_pdf_de_url(url, pasta_sessao / "paginas"))
+        caminho_pdf, cep_ajustado = asyncio.run(
+            gerar_pdf_de_url(url, pasta_sessao / "paginas", pasta_debug=pasta_sessao)
+        )
     except Exception as e:
         flash(f"Não consegui gerar o PDF dessa página: {e}")
         return redirect(url_for("index"))
@@ -224,7 +227,12 @@ def adicionar():
     salvar_estado(pasta_sessao, itens)
 
     if not cep_ajustado:
-        flash("Produto adicionado, mas não consegui definir o CEP automaticamente nessa página (o PDF saiu com o CEP padrão do site).")
+        flash(
+            "Produto adicionado, mas não consegui definir o CEP automaticamente "
+            f"nessa página. <a href='{url_for('ver_debug_cep')}' target='_blank'>"
+            "Ver print de onde travou</a>.",
+            "aviso_html",
+        )
 
     return redirect(url_for("index"))
 
@@ -280,6 +288,15 @@ def baixar():
         writer.write(f)
 
     return send_file(caminho_final, as_attachment=True, download_name=nome_final)
+
+
+@app.route("/debug-cep")
+def ver_debug_cep():
+    pasta_sessao = pasta_da_sessao()
+    caminho = pasta_sessao / "debug_cep_amazon.png"
+    if not caminho.exists():
+        return "Nenhum print de debug disponível ainda.", 404
+    return send_file(caminho, mimetype="image/png")
 
 
 @app.route("/saude")

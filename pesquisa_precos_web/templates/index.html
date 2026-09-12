@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <title>Pesquisa de Preços</title>
+    <style>
+        body {
+            font-family: Arial, Helvetica, sans-serif;
+            background: #f4f5f7;
+            margin: 0;
+            padding: 40px 20px;
+        }
+        .container {
+            max-width: 640px;
+            margin: 0 auto;
+            background: white;
+            padding: 28px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+        }
+        h1 { font-size: 22px; color: #222; margin: 0 0 4px 0; }
+        .subtitulo { color: #666; font-size: 14px; margin-bottom: 20px; }
+
+        form.adicionar {
+            display: flex;
+            gap: 8px;
+        }
+        input[type=text] {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+        button {
+            padding: 10px 16px;
+            background: #2563eb;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            white-space: nowrap;
+        }
+        button:hover { background: #1d4ed8; }
+
+        .erro {
+            background: #fee2e2;
+            color: #991b1b;
+            padding: 8px;
+            border-radius: 5px;
+            font-size: 13px;
+            margin-top: 14px;
+        }
+
+        .lista {
+            margin-top: 24px;
+        }
+        .item-vazio {
+            color: #888;
+            font-size: 14px;
+            text-align: center;
+            padding: 20px 0;
+        }
+        .item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 0;
+            border-bottom: 1px solid #eee;
+        }
+        .item-info { font-size: 14px; }
+        .item-dominio { font-weight: bold; color: #222; }
+        .item-data { color: #888; font-size: 12px; }
+        .item-remover {
+            color: #dc2626;
+            text-decoration: none;
+            font-size: 13px;
+        }
+
+        .acoes {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 24px;
+            gap: 10px;
+        }
+        .botao-baixar {
+            flex: 1;
+            text-align: center;
+            padding: 12px;
+            background: #16a34a;
+            color: white;
+            border-radius: 6px;
+            text-decoration: none;
+            font-size: 15px;
+            font-weight: bold;
+        }
+        .botao-baixar:hover { background: #15803d; }
+        .botao-limpar {
+            text-align: center;
+            padding: 12px 16px;
+            background: #f3f4f6;
+            color: #444;
+            border-radius: 6px;
+            text-decoration: none;
+            font-size: 14px;
+        }
+        .botao-limpar:hover { background: #e5e7eb; }
+
+        .contador {
+            font-size: 13px;
+            color: #666;
+            margin-top: 18px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Pesquisa de Preços</h1>
+        <p class="subtitulo">Cole o link do produto, ele vira uma página no PDF da pesquisa.</p>
+
+        <form class="adicionar" method="POST" action="{{ url_for('adicionar') }}">
+            <input type="text" name="url" placeholder="https://www.exemplo.com/produto" required autofocus>
+            <button type="submit">Adicionar</button>
+        </form>
+
+        {% with mensagens = get_flashed_messages() %}
+            {% if mensagens %}
+                <div class="erro">{{ mensagens[0] }}</div>
+            {% endif %}
+        {% endwith %}
+
+        <div class="lista">
+            {% if itens %}
+                {% for item in itens %}
+                    <div class="item">
+                        <div class="item-info">
+                            <div class="item-dominio">{{ item.dominio }}</div>
+                            <div class="item-data">Adicionado em {{ item.adicionado_em }}</div>
+                        </div>
+                        <a class="item-remover" href="{{ url_for('remover', item_id=item.id) }}"
+                           onclick="return confirm('Remover este produto da pesquisa?')">Remover</a>
+                    </div>
+                {% endfor %}
+                <div class="contador">{{ itens|length }} produto(s) na pesquisa atual</div>
+            {% else %}
+                <div class="item-vazio">Nenhum produto adicionado ainda.</div>
+            {% endif %}
+        </div>
+
+        {% if itens %}
+            <div class="acoes">
+                <a class="botao-baixar" href="{{ url_for('baixar') }}">Baixar PDF completo da pesquisa</a>
+                <a class="botao-limpar" href="{{ url_for('nova_pesquisa') }}"
+                   onclick="return confirm('Isso vai apagar todos os produtos da pesquisa atual. Continuar?')">Nova pesquisa</a>
+            </div>
+        {% endif %}
+    </div>
+</body>
+</html>

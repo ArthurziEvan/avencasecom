@@ -1,7 +1,7 @@
 # Imagem oficial do Playwright já vem com Chromium e todas as dependências
 # do sistema instaladas — evita erros comuns de "faltando biblioteca X"
 # que acontecem tentando instalar tudo manualmente.
-FROM mcr.microsoft.com/playwright/python:v1.48.0-jammy
+FROM mcr.microsoft.com/playwright/python:v1.62.0-jammy
 
 WORKDIR /app
 

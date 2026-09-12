@@ -89,19 +89,30 @@ def nome_arquivo_seguro(url: str) -> str:
     return f"{dominio}_{sufixo}.pdf"
 
 
-async def configurar_cep_amazon(page, cep: str, caminho_debug: Path = None) -> bool:
+async def configurar_cep_amazon(page, cep: str, pasta_debug: Path = None) -> bool:
     """Se a página for da Amazon, define o CEP de entrega antes do print.
-    Retorna True se conseguiu, False se não. Se caminho_debug for informado
-    e a automação falhar, salva um print da tela naquele momento — assim dá
-    pra ver exatamente o que a página mostrava e ajustar os seletores."""
+    Retorna True se conseguiu, False se não. Se pasta_debug for informada,
+    salva prints em cada etapa que falhar — assim dá pra ver exatamente
+    onde travou e ajustar os seletores."""
+
+    async def salvar_print(nome):
+        if pasta_debug is not None:
+            try:
+                await page.screenshot(path=str(pasta_debug / nome))
+            except Exception:
+                pass
+
     try:
-        gatilho = page.locator(
-            "#nav-global-location-popover-link, "
-            "a:has-text('Atualizar CEP'), "
-            "a:has-text('Atualizar local'), "
-            "span:has-text('Atualizar CEP')"
-        ).first
-        await gatilho.click(timeout=8000)
+        # Dá um tempo extra para o widget de localização (que é carregado via
+        # JS, separado do resto da página) terminar de "ligar" os cliques.
+        await page.wait_for_timeout(2000)
+
+        gatilho = page.get_by_text("Atualizar", exact=False).first
+        await gatilho.scroll_into_view_if_needed(timeout=5000)
+        await gatilho.click(timeout=8000, force=True)
+
+        await page.wait_for_timeout(1000)
+        await salvar_print("1_depois_do_clique.png")
 
         campo_cep = page.locator("#GLUXZipUpdateInput")
         await campo_cep.wait_for(state="visible", timeout=8000)
@@ -124,11 +135,7 @@ async def configurar_cep_amazon(page, cep: str, caminho_debug: Path = None) -> b
         await page.wait_for_timeout(2000)
         return True
     except Exception:
-        if caminho_debug is not None:
-            try:
-                await page.screenshot(path=str(caminho_debug))
-            except Exception:
-                pass
+        await salvar_print("2_no_momento_do_erro.png")
         return False
 
 
@@ -147,8 +154,7 @@ async def gerar_pdf_de_url(url: str, pasta_paginas: Path, pasta_debug: Path = No
         await page.goto(url, wait_until="networkidle", timeout=60_000)
 
         if "amazon." in urlparse(url).netloc:
-            caminho_debug = (pasta_debug / "debug_cep_amazon.png") if pasta_debug else None
-            cep_ajustado = await configurar_cep_amazon(page, CEP_PADRAO, caminho_debug)
+            cep_ajustado = await configurar_cep_amazon(page, CEP_PADRAO, pasta_debug)
 
         await page.wait_for_timeout(1500)
 
@@ -228,9 +234,11 @@ def adicionar():
 
     if not cep_ajustado:
         flash(
-            "Produto adicionado, mas não consegui definir o CEP automaticamente "
-            f"nessa página. <a href='{url_for('ver_debug_cep')}' target='_blank'>"
-            "Ver print de onde travou</a>.",
+            "Produto adicionado, mas não consegui definir o CEP automaticamente nessa página. "
+            f"<a href='{url_for('ver_debug_cep', nome='1_depois_do_clique.png')}' target='_blank'>"
+            "Ver print 1 (depois do clique)</a> · "
+            f"<a href='{url_for('ver_debug_cep', nome='2_no_momento_do_erro.png')}' target='_blank'>"
+            "Ver print 2 (no momento do erro)</a>.",
             "aviso_html",
         )
 
@@ -290,12 +298,13 @@ def baixar():
     return send_file(caminho_final, as_attachment=True, download_name=nome_final)
 
 
-@app.route("/debug-cep")
-def ver_debug_cep():
+@app.route("/debug-cep/<nome>")
+def ver_debug_cep(nome):
     pasta_sessao = pasta_da_sessao()
-    caminho = pasta_sessao / "debug_cep_amazon.png"
+    nome = Path(nome).name  # proteção simples contra path traversal
+    caminho = pasta_sessao / nome
     if not caminho.exists():
-        return "Nenhum print de debug disponível ainda.", 404
+        return "Esse print não está disponível (talvez a automação tenha parado antes dessa etapa).", 404
     return send_file(caminho, mimetype="image/png")
 
 

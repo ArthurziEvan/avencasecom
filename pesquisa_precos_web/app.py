@@ -89,37 +89,51 @@ def nome_arquivo_seguro(url: str) -> str:
     return f"{dominio}_{sufixo}.pdf"
 
 
-async def configurar_cep_amazon(page, cep: str):
+async def configurar_cep_amazon(page, cep: str) -> bool:
     """Se a página for da Amazon, define o CEP de entrega antes do print.
-    Se algo não bater (a Amazon muda o site com frequência), simplesmente
-    desiste e segue em frente — não deve travar a geração do PDF."""
+    Retorna True se conseguiu, False se não (para avisar o usuário em vez
+    de falhar silenciosamente)."""
     try:
-        link_localizacao = page.locator("#nav-global-location-popover-link")
-        await link_localizacao.click(timeout=5000)
+        # A Amazon tem mais de um jeito de abrir esse seletor dependendo da
+        # página/layout: às vezes é um ícone de localização no topo, às vezes
+        # é um link de texto "Atualizar CEP" mais abaixo. Tentamos os dois.
+        gatilho = page.locator(
+            "#nav-global-location-popover-link, "
+            "a:has-text('Atualizar CEP'), "
+            "a:has-text('Atualizar local'), "
+            "span:has-text('Atualizar CEP')"
+        ).first
+        await gatilho.click(timeout=8000)
 
         campo_cep = page.locator("#GLUXZipUpdateInput")
-        await campo_cep.wait_for(timeout=5000)
+        await campo_cep.wait_for(state="visible", timeout=8000)
         await campo_cep.fill(cep)
 
-        botao_aplicar = page.locator("#GLUXZipUpdate input[type='submit'], #GLUXZipUpdate button")
-        await botao_aplicar.click(timeout=5000)
+        botao_aplicar = page.locator(
+            "#GLUXZipUpdate input[type='submit'], #GLUXZipUpdate button, #GLUXZipUpdate"
+        ).first
+        await botao_aplicar.click(timeout=8000)
 
         # Depois de aplicar, geralmente aparece um botão "Concluído"/"Done"
-        # para fechar o popover de confirmação.
-        botao_concluir = page.locator(
-            "button:has-text('Concluído'), button:has-text('Done'), "
-            "input[name='glowDoneButton']"
-        )
-        await botao_concluir.click(timeout=5000)
+        # para fechar o popover de confirmação — mas nem sempre aparece,
+        # então não tratamos a ausência dele como falha.
+        try:
+            botao_concluir = page.locator(
+                "button:has-text('Concluído'), button:has-text('Done'), "
+                "input[name='glowDoneButton']"
+            ).first
+            await botao_concluir.click(timeout=4000)
+        except Exception:
+            pass
 
-        # Dá um tempo para a página recarregar os preços/frete com o novo CEP.
         await page.wait_for_timeout(2000)
+        return True
     except Exception:
-        # Não é uma página da Amazon, ou a Amazon mudou o layout — segue sem travar.
-        pass
+        return False
 
 
-async def gerar_pdf_de_url(url: str, pasta_paginas: Path) -> Path:
+async def gerar_pdf_de_url(url: str, pasta_paginas: Path) -> tuple:
+    cep_ajustado = True
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
@@ -133,9 +147,14 @@ async def gerar_pdf_de_url(url: str, pasta_paginas: Path) -> Path:
         await page.goto(url, wait_until="networkidle", timeout=60_000)
 
         if "amazon." in urlparse(url).netloc:
-            await configurar_cep_amazon(page, CEP_PADRAO)
+            cep_ajustado = await configurar_cep_amazon(page, CEP_PADRAO)
 
         await page.wait_for_timeout(1500)
+
+        # Muitos sites têm um CSS específico para impressão que é diferente
+        # (e às vezes quebrado/desalinhado) do que a pessoa vê na tela normal.
+        # Forçar o modo "screen" faz o PDF sair fiel ao que aparece no navegador.
+        await page.emulate_media(media="screen")
 
         caminho_pdf = pasta_paginas / nome_arquivo_seguro(url)
         await page.pdf(
@@ -145,7 +164,7 @@ async def gerar_pdf_de_url(url: str, pasta_paginas: Path) -> Path:
             margin={"top": "10mm", "bottom": "10mm", "left": "10mm", "right": "10mm"},
         )
         await browser.close()
-        return caminho_pdf
+        return caminho_pdf, cep_ajustado
 
 
 # ---------- Limpeza de sessões antigas ----------
@@ -189,7 +208,7 @@ def adicionar():
         return redirect(url_for("index"))
 
     try:
-        caminho_pdf = asyncio.run(gerar_pdf_de_url(url, pasta_sessao / "paginas"))
+        caminho_pdf, cep_ajustado = asyncio.run(gerar_pdf_de_url(url, pasta_sessao / "paginas"))
     except Exception as e:
         flash(f"Não consegui gerar o PDF dessa página: {e}")
         return redirect(url_for("index"))
@@ -203,6 +222,9 @@ def adicionar():
         "arquivo": caminho_pdf.name,
     })
     salvar_estado(pasta_sessao, itens)
+
+    if not cep_ajustado:
+        flash("Produto adicionado, mas não consegui definir o CEP automaticamente nessa página (o PDF saiu com o CEP padrão do site).")
 
     return redirect(url_for("index"))
 

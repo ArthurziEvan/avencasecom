@@ -124,9 +124,16 @@
             <button type="submit">Adicionar</button>
         </form>
 
-        {% with mensagens = get_flashed_messages() %}
-            {% if mensagens %}
-                <div class="erro">{{ mensagens[0] }}</div>
+        {% with mensagens_com_categoria = get_flashed_messages(with_categories=true) %}
+            {% if mensagens_com_categoria %}
+                {% set categoria, mensagem = mensagens_com_categoria[0] %}
+                <div class="erro">
+                    {% if categoria == 'aviso_html' %}
+                        {{ mensagem | safe }}
+                    {% else %}
+                        {{ mensagem }}
+                    {% endif %}
+                </div>
             {% endif %}
         {% endwith %}
 

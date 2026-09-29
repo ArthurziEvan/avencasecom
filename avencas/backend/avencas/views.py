@@ -1,4 +1,6 @@
 import os
+import re
+import unicodedata
 from datetime import date, datetime
 
 import requests
@@ -11,77 +13,227 @@ from rest_framework.views import APIView
 from .models import ComentarioAvenca
 
 URL_SITE = "https://www6g.senado.gov.br/transparencia/licitacoes-e-contratos/contratos"
+URL_EDITAL = "https://www6g.senado.gov.br/transparencia/licitacoes-e-contratos/licitacoes/{id}/edital"
 
 
-def pick(c, *nomes):
-    mapa = {str(k).lower(): v for k, v in c.items()}
+# ---------- leitura tolerante do JSON do Senado ----------
+
+def _k(s):
+    """Normaliza nome de campo: sem acento, minúsculo, sem _ . espaço (data_fim_vigencia -> datafimvigencia)."""
+    s = unicodedata.normalize("NFKD", str(s)).encode("ascii", "ignore").decode().lower()
+    return re.sub(r"[^a-z0-9]", "", s)
+
+
+def achatar(d, prefixo="", saida=None):
+    saida = {} if saida is None else saida
+    if isinstance(d, dict):
+        for k, v in d.items():
+            achatar(v, f"{prefixo}.{k}" if prefixo else str(k), saida)
+    elif not isinstance(d, list):
+        saida[prefixo] = d
+    return saida
+
+
+def mapa(c):
+    """Cada valor fica acessível pelo caminho completo (empresa.nome -> empresanome) e pelo nome final (nome)."""
+    m = {}
+    for caminho, v in achatar(c).items():
+        if v in (None, "", []):
+            continue
+        m.setdefault(_k(caminho), v)
+        m.setdefault(_k(caminho.split(".")[-1]), v)
+    return m
+
+
+def pick(m, *nomes):
     for n in nomes:
-        v = mapa.get(n.lower())
-        if v not in (None, "", []):
+        v = m.get(_k(n))
+        if v not in (None, ""):
+            return v
+    return None
+
+
+def achar(m, *partes):
+    for k, v in m.items():
+        if all(p in k for p in partes):
             return v
     return None
 
 
 def texto(v):
-    if isinstance(v, dict):
-        return str(pick(v, "nome", "razaoSocial", "descricao", "sigla") or "")
-    return "" if v is None else str(v)
+    return "" if v is None else str(v).strip()
 
 
 def parse_data(v):
     if not v:
         return None
-    for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
+    s = str(v).strip()
+    for fmt, n in (("%Y-%m-%d", 10), ("%d/%m/%Y", 10), ("%Y%m%d", 8)):
         try:
-            return datetime.strptime(str(v)[:10], fmt).date()
+            return datetime.strptime(s[:n], fmt).date()
         except ValueError:
             continue
     return None
 
 
-def normalizar(c):
-    """Se algum campo vier vazio na tela, acesse /api/v1/debug-senado/ e ajuste os nomes abaixo."""
-    inicio = parse_data(pick(c, "dataInicioVigencia", "dataInicio", "inicioVigencia", "dataAssinatura"))
-    fim = parse_data(pick(c, "dataFimVigencia", "dataFim", "fimVigencia", "dataTermino"))
-    dias = (fim - date.today()).days if fim else None
-    numero = texto(pick(c, "numero", "numeroContrato", "num"))
-    ano = texto(pick(c, "ano", "anoContrato"))
-    valor = pick(c, "valorTotal", "valor", "valorGlobal", "valorContrato")
-    try:
-        valor = float(valor) if valor is not None else None
-    except (TypeError, ValueError):
-        valor = None
-    link = texto(pick(c, "urlContrato", "url", "link", "urlDocumento"))
-    if not link:
-        link = f"{URL_SITE}?numero={numero}&ano={ano}&v=true"
-    return {
-        "id": texto(pick(c, "id", "codigo", "idContrato", "sequencial")) or f"{numero}-{ano}",
-        "numero": f"{numero}/{ano}" if ano else numero,
-        "objeto": texto(pick(c, "objeto", "descricaoObjeto", "descricao")),
-        "fornecedor": texto(pick(c, "nomeEmpresa", "nomeFornecedor", "empresa", "fornecedor", "contratada", "razaoSocial")),
-        "cnpj": texto(pick(c, "cnpj", "cnpjEmpresa", "cnpjFornecedor", "cnpjCpf")),
-        "orgao": texto(pick(c, "orgaoGestorTitular", "orgaoGestor", "unidadeGestora", "orgao")) or "Não informado",
-        "valor": valor,
-        "inicio": inicio.isoformat() if inicio else None,
-        "fim": fim.isoformat() if fim else None,
-        "dias_restantes": dias,
-        "vence_em_6_meses": dias is not None and 0 <= dias < 180,
-        "urgencia_critica": dias is not None and 0 <= dias < 60,
-        "link": link,
-    }
+def data_de(m, nomes, *fuzzy):
+    for n in nomes:
+        d = parse_data(m.get(_k(n)))
+        if d:
+            return d
+    for partes in fuzzy:
+        for k, v in m.items():
+            if all(p in k for p in partes):
+                d = parse_data(v)
+                if d:
+                    return d
+    return None
 
 
-def buscar_senado():
-    r = requests.get(os.environ["SENADO_CONTRATOS_URL"],
-                     headers={"Accept": "application/json"}, timeout=60)
+def iso(d):
+    return d.isoformat() if d else None
+
+
+def formatar_numero(raw):
+    """CT20040116 / 20040116 -> ('CT', '116/2004'), igual ao site do Senado."""
+    r = raw.strip()
+    mt = re.match(r"^([A-Za-z]*)\s*(\d{4})(\d{1,4})$", r)
+    if mt:
+        tipo, ano, seq = mt.groups()
+        return (tipo.upper() or "CT"), f"{int(seq)}/{ano}"
+    mt = re.match(r"^([A-Za-z]+)\s*(.+)$", r)
+    if mt:
+        return mt.group(1).upper(), mt.group(2)
+    return "CT", r
+
+
+# ---------- editais (licitações) ----------
+
+def base_api():
+    return os.environ["SENADO_CONTRATOS_URL"].rstrip("/")
+
+
+def get_json(url):
+    r = requests.get(url, headers={"Accept": "application/json"}, timeout=60)
     r.raise_for_status()
-    dados = r.json()
+    return r.json()
+
+
+def como_lista(dados):
     if isinstance(dados, dict):
-        for k in ("contratos", "data", "content", "items", "resultado"):
+        for k in ("contratos", "licitacoes", "aditivos", "itens", "data", "content", "items", "resultado"):
             if isinstance(dados.get(k), list):
                 return dados[k]
         return [dados]
     return dados
+
+
+def chaves_licitacao(v):
+    """Aceita '29/2018', '292018' ou '20180029' e devolve possíveis (sequencial, ano)."""
+    s = texto(v)
+    m = re.match(r"^(\d+)\s*/\s*(\d{4})$", s)
+    if m:
+        return [(int(m.group(1)), m.group(2))]
+    d = re.sub(r"\D", "", s)
+    saida = []
+    if len(d) >= 5:
+        saida.append((int(d[:-4]), d[-4:]))
+        if 1990 <= int(d[:4]) <= 2100:
+            saida.append((int(d[4:]), d[:4]))
+    return saida
+
+
+def mapa_editais():
+    dados = cache.get("editais")
+    if dados is not None:
+        return dados
+    dados = {}
+    try:
+        url = base_api().rsplit("/contratos", 1)[0] + "/licitacoes"
+        for lic in como_lista(get_json(url)):
+            m = mapa(lic)
+            link = texto(achar(m, "edital"))
+            if not link.startswith("http"):
+                _id = pick(m, "id", "codigo")
+                link = URL_EDITAL.format(id=_id) if _id else ""
+            if not link:
+                continue
+            for k in chaves_licitacao(pick(m, "numero", "numerolicitacao")):
+                dados.setdefault(k, []).append((texto(pick(m, "modalidade")).lower(), link))
+    except Exception:
+        pass
+    cache.set("editais", dados, 6 * 3600 if dados else 300)
+    return dados
+
+
+def localizar_edital(editais, numero_licitacao, modalidade):
+    for k in chaves_licitacao(numero_licitacao):
+        lst = editais.get(k)
+        if lst:
+            mod = modalidade.lower()
+            for m_, link in lst:
+                if mod and m_ and (mod in m_ or m_ in mod):
+                    return link
+            return lst[0][1]
+    return None
+
+
+# ---------- normalização do contrato ----------
+
+def normalizar(c, editais=None):
+    """Se algum campo vier vazio, abra /api/v1/debug-senado/ (admin) e ajuste os nomes abaixo."""
+    m = mapa(c)
+    assinatura = data_de(m, ["dataAssinatura", "assinatura"])
+    publicacao = data_de(m, ["dataPublicacao", "publicacao"])
+    inicio = data_de(m, ["inicioVigencia", "dataInicioVigencia", "vigenciaInicio", "dataInicio"], ("inicio", "vigenc")) or assinatura
+    fim = data_de(m, ["fimVigencia", "dataFimVigencia", "vigenciaFim", "vigenciaFinal", "dataTermino", "dataFim"],
+                  ("fim", "vigenc"), ("termino",), ("final", "vigenc"))
+    dias = (fim - date.today()).days if fim else None
+
+    raw = texto(pick(m, "numeroContrato", "numero", "num"))
+    tipo, numero = formatar_numero(raw)
+    ano = texto(pick(m, "ano", "anoContrato"))
+    num_url = re.sub(r"\D", "", raw)
+    ano_url = ano if ano and len(num_url) < 8 else ""
+    if ano and "/" not in numero and len(num_url) < 8:
+        numero = f"{numero}/{ano}"
+
+    valor = pick(m, "valorTotal", "valor", "valorGlobal", "valorContrato", "valorInicial")
+    try:
+        valor = float(valor) if valor is not None else None
+    except (TypeError, ValueError):
+        valor = None
+
+    num_lic = texto(pick(m, "numeroLicitacao", "licitacaoNumero", "licitacao"))
+    modalidade = texto(pick(m, "modalidade", "modalidadeLicitacao"))
+    return {
+        "id": texto(pick(m, "id", "codigo", "idContrato", "sequencial")) or f"{num_url}-{ano}",
+        "tipo": tipo,
+        "numero": numero,
+        "objeto": texto(pick(m, "objeto", "descricaoObjeto", "descricao")),
+        "fornecedor": texto(pick(m, "empresaNome", "nomeEmpresa", "nomeFornecedor", "empresa", "fornecedor",
+                                 "contratada", "razaoSocial")),
+        "cnpj": texto(pick(m, "empresaCnpj", "cnpj", "cnpjEmpresa", "cnpjFornecedor", "cnpjCpf")),
+        "orgao": texto(pick(m, "orgaoGestorTitular", "orgaoGestor", "unidadeGestoraNome", "unidadeGestora", "orgao"))
+                 or "Não informado",
+        "valor": valor,
+        "assinatura": iso(assinatura),
+        "publicacao": iso(publicacao),
+        "inicio": iso(inicio),
+        "fim": iso(fim),
+        "dias_restantes": dias,
+        "vence_em_6_meses": dias is not None and 0 <= dias < 180,
+        "urgencia_critica": dias is not None and 0 <= dias < 60,
+        "processo": texto(pick(m, "processo", "numeroProcesso")),
+        "modalidade": modalidade,
+        "numero_licitacao": num_lic,
+        "edital": localizar_edital(editais or {}, num_lic, modalidade) if num_lic else None,
+        "link": f"{URL_SITE}?numero={num_url}&ano={ano_url}&v=true",
+    }
+
+
+def buscar_senado():
+    return como_lista(get_json(base_api()))
 
 
 def serializar(c):
@@ -91,6 +243,22 @@ def serializar(c):
         "data_modificacao": c.data_modificacao, "foi_editado": c.foi_editado,
     }
 
+
+def resumir(item):
+    m = mapa(item)
+    r = {
+        "numero": texto(pick(m, "numeroAditivo", "numeroItem", "numero")) or None,
+        "descricao": texto(pick(m, "descricao", "objeto")) or None,
+        "assinatura": iso(data_de(m, ["dataAssinatura"])),
+        "publicacao": iso(data_de(m, ["dataPublicacao"])),
+        "fim_vigencia": iso(data_de(m, ["fimVigencia", "dataFimVigencia"], ("fim", "vigenc"))),
+        "quantidade": pick(m, "quantidadeContratada", "quantidade"),
+        "valor": pick(m, "valorUnitario", "valor", "valorTotal"),
+    }
+    return {k: v for k, v in r.items() if v is not None}
+
+
+# ---------- endpoints ----------
 
 class Me(APIView):
     def get(self, request):
@@ -114,7 +282,8 @@ class ContratosVigentes(APIView):
         dados = cache.get("contratos")
         if dados is None:
             try:
-                dados = [normalizar(c) for c in buscar_senado()]
+                editais = mapa_editais()
+                dados = [normalizar(c, editais) for c in buscar_senado()]
             except (requests.RequestException, ValueError) as e:
                 return Response({"erro": f"Falha ao consultar o Senado: {e}"},
                                 status=status.HTTP_502_BAD_GATEWAY)
@@ -127,6 +296,24 @@ class ContratosVigentes(APIView):
         for c in qs:
             por_contrato.setdefault(c.id_avenca_senado, []).append(serializar(c))
         return Response([{**d, "comentarios": por_contrato.get(d["id"], [])} for d in dados])
+
+
+class ContratoDetalhe(APIView):
+    """Aditivos e itens de um contrato, buscados só quando a linha é aberta."""
+
+    def get(self, request, pk):
+        chave = f"detalhe-{pk}"
+        saida = cache.get(chave)
+        if saida is None:
+            saida = {"aditivos": [], "itens": [], "erros": []}
+            for campo in ("aditivos", "itens"):
+                try:
+                    saida[campo] = [resumir(x) for x in como_lista(get_json(f"{base_api()}/{pk}/{campo}"))][:100]
+                except Exception as e:
+                    saida["erros"].append(f"{campo}: {e}")
+            if not saida["erros"]:
+                cache.set(chave, saida, 1800)
+        return Response(saida)
 
 
 class ComentarioCreate(APIView):

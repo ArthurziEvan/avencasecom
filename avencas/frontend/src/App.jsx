@@ -18,6 +18,10 @@ const fmt = (d) => (d ? new Date(d.length === 10 ? d + "T00:00" : d).toLocaleDat
 const brl = (v) => (v == null ? "—" : v.toLocaleString("pt-BR", { style: "currency", currency: "BRL" }));
 const norm = (s) => String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 const digitos = (s) => String(s || "").replace(/\D/g, "");
+const unidades = (o) => String(o || "").split(";").map((x) => x.trim()).filter(Boolean);
+const sigla = (u) => (u.match(/^([^\s(]+)/) || [])[1] || u;
+const RX_MAO_OBRA = /m[aã]o[ -]de[ -]obra|dedica[cç][aã]o exclusiva|terceiriza|postos? de trabalho|vigil[aâ]ncia|limpeza|conserva[cç][aã]o|copeira|apoio administrativo|motorista/i;
+const RX_OBRA = /\bobras?\b|reforma|constru[cç][aã]o|engenharia|impermeabiliza|reparo/i;
 
 function chaveNumero(c) {
   const [seq, ano] = String(c.numero).split("/");
@@ -221,7 +225,7 @@ export default function App() {
   const atualizarComentarios = (id, fn) =>
     setLista((l) => l.map((c) => (c.id === id ? { ...c, comentarios: fn(c.comentarios) } : c)));
 
-  const orgaos = useMemo(() => [...new Set(lista.map((c) => c.orgao))].sort(), [lista]);
+  const orgaos = useMemo(() => [...new Set(lista.flatMap((c) => unidades(c.orgao)))].sort(), [lista]);
   const especies = useMemo(() => [...new Set([...ESPECIES, ...lista.map((c) => c.especie).filter(Boolean)])].sort(), [lista]);
   const buscar = () => setF(rascunho);
   const limpar = () => { setRascunho(VAZIO); setF(VAZIO); setOrgao(""); setSo6m(false); setSoCriticos(false); setSoSensiveis(false); };
@@ -229,6 +233,7 @@ export default function App() {
 
   const filtrada = useMemo(() => {
     const emp = norm(f.empresa), obj = norm(f.objeto), num = digitos(f.numero);
+    const usaMO = lista.some((c) => c.mao_de_obra), usaOB = lista.some((c) => c.obra_engenharia);
     return lista
       .filter((c) =>
         (!emp || norm(`${c.fornecedor} ${c.cnpj}`).includes(emp) || (digitos(emp) && digitos(c.cnpj).includes(digitos(emp)))) &&
@@ -236,8 +241,8 @@ export default function App() {
         (!f.ano || anoDe(c) === f.ano) &&
         (!obj || norm(c.objeto).includes(obj)) &&
         (!f.especie || c.especie === f.especie) &&
-        (!f.maoObra || c.mao_de_obra) && (!f.obras || c.obra_engenharia) && (!f.renovacao || c.em_renovacao) &&
-        (!orgao || c.orgao === orgao) &&
+        (!f.maoObra || (usaMO ? c.mao_de_obra : RX_MAO_OBRA.test(c.objeto))) && (!f.obras || (usaOB ? c.obra_engenharia : RX_OBRA.test(c.objeto))) && (!f.renovacao || c.em_renovacao) &&
+        (!orgao || unidades(c.orgao).includes(orgao)) &&
         (!so6m || c.vence_em_6_meses) && (!soCriticos || c.urgencia_critica) &&
         (!soSensiveis || SENSIVEIS.some((t) => ` ${c.objeto.toLowerCase()} `.includes(t))))
       .sort((a, b) =>
@@ -287,7 +292,7 @@ export default function App() {
               {especies.map((e) => <option key={e}>{e}</option>)}
             </select>
             <select className={`${campo} md:col-span-3`} value={orgao} onChange={(e) => setOrgao(e.target.value)}>
-              <option value="">Todos os órgãos</option>
+              <option value="">Todos os órgãos gestores titulares</option>
               {orgaos.map((o) => <option key={o}>{o}</option>)}
             </select>
           </div>
@@ -345,6 +350,10 @@ export default function App() {
                     <td className="p-3">
                       <div className="line-clamp-3">{c.objeto}</div>
                       <div className="mt-1 flex items-center gap-2 text-xs text-slate-500">
+                        {unidades(c.orgao).map((u) => (
+                          <button key={u} title={`Filtrar por ${u}`} onClick={(e) => { e.stopPropagation(); setOrgao(u); }}
+                            className="rounded bg-sky-100 px-1.5 py-0.5 font-semibold text-sky-800 hover:bg-sky-200">{sigla(u)}</button>
+                        ))}
                         {c.comentarios.length > 0 && <span className="rounded bg-yellow-100 px-1.5 py-0.5 font-semibold text-yellow-800">{c.comentarios.length} anotação(ões)</span>}
                         {c.edital && <span className="inline-flex items-center gap-1"><FileText size={12} /> edital disponível</span>}
                       </div>
@@ -361,7 +370,7 @@ export default function App() {
                         <div className="grid gap-4 lg:grid-cols-5">
                           <dl className="space-y-2 text-sm lg:col-span-2">
                             <div><dt className="text-xs text-slate-500">Espécie</dt><dd>{c.especie || c.tipo}</dd></div>
-                            <div><dt className="text-xs text-slate-500">Órgão gestor</dt><dd>{c.orgao}</dd></div>
+                            <div><dt className="text-xs text-slate-500">Órgão gestor titular</dt><dd>{c.orgao}</dd></div>
                             <div><dt className="text-xs text-slate-500">Valor</dt><dd>{brl(c.valor)}</dd></div>
                             <div><dt className="text-xs text-slate-500">Processo</dt><dd>{c.processo || "—"}</dd></div>
                             <div><dt className="text-xs text-slate-500">Licitação</dt><dd>{[c.modalidade, c.numero_licitacao].filter(Boolean).join(" ") || "—"}</dd></div>
